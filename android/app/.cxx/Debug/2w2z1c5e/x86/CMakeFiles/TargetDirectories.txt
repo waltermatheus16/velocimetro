@@ -1,0 +1,2 @@
+C:/Users/alias/velocimetro/android/app/.cxx/Debug/2w2z1c5e/x86/CMakeFiles/edit_cache.dir
+C:/Users/alias/velocimetro/android/app/.cxx/Debug/2w2z1c5e/x86/CMakeFiles/rebuild_cache.dir

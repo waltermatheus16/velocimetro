@@ -2,6 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:intl/intl.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:geocoding/geocoding.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
 
 void main() {
   runApp(const MyApp());
@@ -43,11 +47,33 @@ class _SpeedometerScreenState extends State<SpeedometerScreen> {
   DateTime? _startTime;
   bool _isTracking = false;
   final _numberFormat = NumberFormat('#,##0.0', 'pt_BR');
+  
+  // Mapa
+  GoogleMapController? _mapController;
+  Set<Marker> _markers = {};
+  Set<Polyline> _polylines = {};
+  List<LatLng> _trackPoints = [];
+  
+  // Busca de endereço
+  final TextEditingController _searchController = TextEditingController();
+  List<Map<String, dynamic>> _searchResults = [];
+  bool _isSearching = false;
+  
+  // Posição inicial (São Paulo)
+  static const LatLng _initialPosition = LatLng(-23.5505, -46.6333);
 
   @override
   void initState() {
     super.initState();
     _requestLocationPermission();
+    _getCurrentLocation();
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    _mapController?.dispose();
+    super.dispose();
   }
 
   Future<void> _requestLocationPermission() async {
@@ -70,6 +96,23 @@ class _SpeedometerScreenState extends State<SpeedometerScreen> {
     }
   }
 
+  Future<void> _getCurrentLocation() async {
+    try {
+      Position position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+      );
+      
+      setState(() {
+        _lastPosition = position;
+        _addMarker(LatLng(position.latitude, position.longitude), 'Sua posição');
+      });
+      
+      _animateToPosition(LatLng(position.latitude, position.longitude));
+    } catch (e) {
+      print('Erro ao obter localização: $e');
+    }
+  }
+
   void _startTracking() async {
     setState(() {
       _isTracking = true;
@@ -77,6 +120,8 @@ class _SpeedometerScreenState extends State<SpeedometerScreen> {
       _distance = 0.0;
       _averageSpeed = 0.0;
       _elapsedTime = Duration.zero;
+      _trackPoints.clear();
+      _polylines.clear();
     });
 
     await WakelockPlus.enable();
@@ -87,6 +132,8 @@ class _SpeedometerScreenState extends State<SpeedometerScreen> {
         distanceFilter: 1,
       ),
     ).listen((Position position) {
+      LatLng currentLatLng = LatLng(position.latitude, position.longitude);
+      
       if (_lastPosition != null) {
         double distanceInMeters = Geolocator.distanceBetween(
           _lastPosition!.latitude,
@@ -102,6 +149,19 @@ class _SpeedometerScreenState extends State<SpeedometerScreen> {
           if (_elapsedTime.inSeconds > 0) {
             _averageSpeed = (_distance / _elapsedTime.inHours);
           }
+          
+          // Adicionar ponto ao rastro
+          _trackPoints.add(currentLatLng);
+          _updateTrackPolyline();
+          
+          // Atualizar marcador de posição atual
+          _updateCurrentPositionMarker(currentLatLng);
+        });
+      } else {
+        setState(() {
+          _trackPoints.add(currentLatLng);
+          _updateTrackPolyline();
+          _updateCurrentPositionMarker(currentLatLng);
         });
       }
       _lastPosition = position;
@@ -123,6 +183,103 @@ class _SpeedometerScreenState extends State<SpeedometerScreen> {
       _elapsedTime = Duration.zero;
       _startTime = DateTime.now();
       _lastPosition = null;
+      _trackPoints.clear();
+      _polylines.clear();
+      _markers.clear();
+    });
+  }
+
+  void _addMarker(LatLng position, String title) {
+    setState(() {
+      _markers.add(
+        Marker(
+          markerId: MarkerId(title),
+          position: position,
+          infoWindow: InfoWindow(title: title),
+        ),
+      );
+    });
+  }
+
+  void _updateCurrentPositionMarker(LatLng position) {
+    setState(() {
+      _markers.removeWhere((marker) => marker.markerId.value == 'Posição Atual');
+      _markers.add(
+        Marker(
+          markerId: const MarkerId('Posição Atual'),
+          position: position,
+          infoWindow: const InfoWindow(title: 'Posição Atual'),
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
+        ),
+      );
+    });
+  }
+
+  void _updateTrackPolyline() {
+    if (_trackPoints.length > 1) {
+      setState(() {
+        _polylines.clear();
+        _polylines.add(
+          Polyline(
+            polylineId: const PolylineId('track'),
+            points: _trackPoints,
+            color: Colors.blue,
+            width: 3,
+          ),
+        );
+      });
+    }
+  }
+
+  void _animateToPosition(LatLng position) {
+    _mapController?.animateCamera(
+      CameraUpdate.newLatLngZoom(position, 15),
+    );
+  }
+
+  Future<void> _searchAddress(String query) async {
+    if (query.isEmpty) {
+      setState(() {
+        _searchResults.clear();
+        _isSearching = false;
+      });
+      return;
+    }
+
+    setState(() {
+      _isSearching = true;
+    });
+
+    try {
+      // Usar a API de geocoding do Google (requer chave de API)
+      // Por simplicidade, vou usar uma busca básica
+      List<Location> locations = await locationFromAddress(query);
+      
+      setState(() {
+        _searchResults = locations.map((location) => {
+          'name': query,
+          'latitude': location.latitude,
+          'longitude': location.longitude,
+        }).toList();
+        _isSearching = false;
+      });
+    } catch (e) {
+      setState(() {
+        _searchResults.clear();
+        _isSearching = false;
+      });
+      print('Erro na busca: $e');
+    }
+  }
+
+  void _selectSearchResult(Map<String, dynamic> result) {
+    LatLng position = LatLng(result['latitude'], result['longitude']);
+    _addMarker(position, result['name']);
+    _animateToPosition(position);
+    
+    setState(() {
+      _searchResults.clear();
+      _searchController.clear();
     });
   }
 
@@ -139,52 +296,126 @@ class _SpeedometerScreenState extends State<SpeedometerScreen> {
         foregroundColor: Colors.white,
         elevation: 0,
       ),
-      body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [
-              Theme.of(context).colorScheme.primary,
-              Theme.of(context).colorScheme.background,
-            ],
+      body: Column(
+        children: [
+          // Barra de busca
+          _buildSearchBar(),
+          // Mapa
+          Expanded(
+            flex: 2,
+            child: _buildMap(),
           ),
-        ),
-        child: SafeArea(
-          child: Column(
-            children: [
-              const SizedBox(height: 20),
-              _buildSpeedDisplay(),
-              const SizedBox(height: 30),
-              Expanded(
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: Theme.of(context).colorScheme.background,
-                    borderRadius: const BorderRadius.only(
-                      topLeft: Radius.circular(30),
-                      topRight: Radius.circular(30),
-                    ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.1),
-                        blurRadius: 10,
-                        offset: const Offset(0, -5),
-                      ),
-                    ],
-                  ),
-                  child: Column(
-                    children: [
-                      const SizedBox(height: 20),
-                      _buildInfoCards(),
-                      const SizedBox(height: 20),
-                      _buildControlButtons(),
-                    ],
-                  ),
-                ),
+          // Painel de velocímetro
+          Expanded(
+            flex: 1,
+            child: _buildSpeedometerPanel(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSearchBar() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      color: Theme.of(context).colorScheme.primary,
+      child: Column(
+        children: [
+          TextField(
+            controller: _searchController,
+            onChanged: _searchAddress,
+            decoration: InputDecoration(
+              hintText: 'Buscar endereço...',
+              filled: true,
+              fillColor: Colors.white,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(25),
+                borderSide: BorderSide.none,
               ),
-            ],
+              prefixIcon: const Icon(Icons.search),
+              suffixIcon: _isSearching
+                  ? const Padding(
+                      padding: EdgeInsets.all(12),
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : null,
+            ),
           ),
+          if (_searchResults.isNotEmpty)
+            Container(
+              margin: const EdgeInsets.only(top: 8),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(8),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.1),
+                    blurRadius: 4,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: _searchResults.length,
+                itemBuilder: (context, index) {
+                  final result = _searchResults[index];
+                  return ListTile(
+                    leading: const Icon(Icons.location_on),
+                    title: Text(result['name']),
+                    onTap: () => _selectSearchResult(result),
+                  );
+                },
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMap() {
+    return GoogleMap(
+      onMapCreated: (GoogleMapController controller) {
+        _mapController = controller;
+      },
+      initialCameraPosition: const CameraPosition(
+        target: _initialPosition,
+        zoom: 15,
+      ),
+      markers: _markers,
+      polylines: _polylines,
+      myLocationEnabled: true,
+      myLocationButtonEnabled: true,
+      zoomControlsEnabled: false,
+    );
+  }
+
+  Widget _buildSpeedometerPanel() {
+    return Container(
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.background,
+        borderRadius: const BorderRadius.only(
+          topLeft: Radius.circular(20),
+          topRight: Radius.circular(20),
         ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 10,
+            offset: const Offset(0, -5),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          const SizedBox(height: 20),
+          _buildSpeedDisplay(),
+          const SizedBox(height: 20),
+          _buildInfoCards(),
+          const SizedBox(height: 20),
+          _buildControlButtons(),
+          const SizedBox(height: 20),
+        ],
       ),
     );
   }
@@ -199,25 +430,25 @@ class _SpeedometerScreenState extends State<SpeedometerScreen> {
             style: TextStyle(
               fontSize: 16,
               fontWeight: FontWeight.bold,
-              color: Colors.white,
+              color: Colors.grey,
               letterSpacing: 1.5,
             ),
           ),
           const SizedBox(height: 10),
           Text(
             '${_numberFormat.format(_currentSpeed)}',
-            style: const TextStyle(
-              fontSize: 72,
+            style: TextStyle(
+              fontSize: 48,
               fontWeight: FontWeight.bold,
-              color: Colors.white,
+              color: Theme.of(context).colorScheme.primary,
             ),
           ),
           const Text(
             'km/h',
             style: TextStyle(
-              fontSize: 24,
+              fontSize: 18,
               fontWeight: FontWeight.w500,
-              color: Colors.white,
+              color: Colors.grey,
             ),
           ),
         ],
